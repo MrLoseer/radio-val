@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Radio Chocomenta</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+</head>
+<body>
+    <div class="toggle-switch-container">
+        <span>Animación</span>
+        <label class="switch"> <input type="checkbox" id="bg-toggle"> <span class="slider"></span> </label>
+    </div>
+    <div id="user-counter">👤 Cargando...</div>
+    <div id="app-container">
+        <div id="left-column">
+            <h1>Radio Val</h1>
+            <p class="subtitle">Nuestra Frecuencia Privada</p>
+            <div id="surprise-box" class="container-box" style="display: none;">
+                <h3>⭐¡Hola, mi estrella, aquí está la sorpresa de hoy!</h3>
+                <p id="surprise-message"></p>
+                <button id="play-surprise-button">Reproducir Sorpresa</button>
+            </div>
+            <div id="search-container">
+                <input type="text" id="search-query" placeholder="Busca una canción para añadir a la cola...">
+                <button id="search-button">Buscar</button>
+            </div>
+            <div id="search-results"></div>
+            <div id="player-container">
+                <div id="player"></div>
+                <div id="join-overlay"><button id="join-button">Haz clic para unirte a la radio</button></div>
+                <div id="error-overlay"><p id="error-message"></p></div>
+            </div>
+            <div id="direct-link-controls" class="container-box">
+                <input type="text" id="song-url" placeholder="O pega un enlace de YouTube aquí...">
+                <button id="load-button">Cargar</button>
+            </div>
+        </div>
+        <div id="right-column">
+            <div id="chat-container" class="container-box">
+                <h3>Chat en Vivo</h3>
+                <div id="user-name-container">
+                    <input type="text" id="user-name-input" placeholder="Tu nombre...">
+                    <button id="user-name-button">Guardar</button>
+                </div>
+                <div id="chat-messages"></div>
+                <div id="chat-input-container">
+                    <input type="text" id="chat-input" placeholder="Escribe un mensaje...">
+                    <button id="chat-send-button">Enviar</button>
+                </div>
+            </div>
+            <div id="queue-container" class="container-box">
+                <h3>A continuación:</h3>
+                <div id="queue-list"><p>La cola está vacía. ¡Añade canciones!</p></div>
+                <div class="queue-controls">
+                    <button id="clear-queue-button">Limpiar Cola</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://www.youtube.com/iframe_api"></script>
+    <script>
+        const socket = io();
+        let player, isPlayerReady = false, initialState = null, lastServerUpdate = 0, userName = '';
+
+        const userNameInput = document.getElementById('user-name-input');
+        const userNameButton = document.getElementById('user-name-button');
+        const searchButton = document.getElementById('search-button');
+        const searchQuery = document.getElementById('search-query');
+        const searchResultsDiv = document.getElementById('search-results');
+        const queueListDiv = document.getElementById('queue-list');
+        const chatMessages = document.getElementById('chat-messages');
+        const chatInput = document.getElementById('chat-input');
+        const chatSendButton = document.getElementById('chat-send-button');
+        const joinButton = document.getElementById('join-button');
+        const bgToggle = document.getElementById('bg-toggle');
+        const songUrlInput = document.getElementById('song-url');
+        const loadButton = document.getElementById('load-button');
+        const userCounterDiv = document.getElementById('user-counter');
+        const clearQueueButton = document.getElementById('clear-queue-button');
+        let sortable;
+        
+        // --- LÓGICA DE DRAG & DROP Y LIMPIAR ---
+        function initializeSortable() {
+            if (sortable) { sortable.destroy(); }
+            sortable = new Sortable(queueListDiv, {
+                animation: 150, ghostClass: 'sortable-ghost',
+                onEnd: function (evt) {
+                    const newQueueOrder = Array.from(queueListDiv.children).map(item => ({
+                        videoId: item.dataset.videoId,
+                        title: item.textContent
+                    }));
+                    socket.emit('reorder-queue', newQueueOrder);
+                }
+            });
+        }
+        clearQueueButton.addEventListener('click', () => { socket.emit('clear-queue'); });
+
+        // --- FUNCIÓN DE ACTUALIZAR COLA MODIFICADA ---
+        function updateQueue(queue = []) {
+            const isEmpty = queue.length === 0;
+            clearQueueButton.style.display = isEmpty ? 'none' : 'inline-block';
+
+            if (isEmpty) {
+                queueListDiv.innerHTML = '<p>La cola está vacía. ¡Añade canciones!</p>';
+            } else {
+                queueListDiv.innerHTML = '';
+                queue.forEach((video, index) => {
+                    const item = document.createElement('div');
+                    item.className = 'queue-item';
+                    item.textContent = video.title;
+                    item.dataset.videoId = video.videoId;
+                    item.dataset.index = index;
+                    queueListDiv.appendChild(item);
+                });
+            }
+            initializeSortable();
+        }
+
+        // --- (El resto de tu código JS no cambia, solo pégalo aquí) ---
+        // Para asegurar que todo esté, lo pego completo debajo.
+        if (localStorage.getItem('animatedBg') === 'true' || localStorage.getItem('animatedBg') === null) { document.body.classList.add('animated-bg'); bgToggle.checked = true; }
+        bgToggle.addEventListener('change', () => { if (bgToggle.checked) { document.body.classList.add('animated-bg'); localStorage.setItem('animatedBg', 'true'); } else { document.body.classList.remove('animated-bg'); localStorage.setItem('animatedBg', 'false'); } });
+        userNameButton.addEventListener('click', () => { const name = userNameInput.value.trim(); if (name) { userName = name; userNameInput.disabled = true; userNameButton.disabled = true; userNameButton.textContent = 'Guardado'; localStorage.setItem('radioChocomentaUserName', name); } });
+        window.addEventListener('load', async () => {
+            const savedName = localStorage.getItem('radioChocomentaUserName');
+            if (savedName) { userName = savedName; userNameInput.value = savedName; userNameInput.disabled = true; userNameButton.disabled = true; userNameButton.textContent = 'Guardado'; }
+            try {
+                const response = await fetch('/surprise');
+                const surprise = await response.json();
+                if (surprise) {
+                    const surpriseBox = document.getElementById('surprise-box');
+                    const surpriseMessage = document.getElementById('surprise-message');
+                    const playSurpriseButton = document.getElementById('play-surprise-button');
+                    surpriseMessage.textContent = surprise.message;
+                    surpriseBox.style.display = 'block';
+                    playSurpriseButton.addEventListener('click', () => { socket.emit('add-to-queue', { videoId: surprise.videoId, title: surprise.title }); surpriseBox.style.display = 'none'; });
+                }
+            } catch (error) { console.error("Error al buscar la sorpresa:", error); }
+        });
+        async function fetchSearchResults() { const query = searchQuery.value; if (!query) return; searchResultsDiv.innerHTML = '<p>Buscando...</p>'; const response = await fetch(`/search?q=${encodeURIComponent(query)}`); const data = await response.json(); searchResultsDiv.innerHTML = ''; data.results.forEach(result => { const item = document.createElement('div'); item.className = 'result-item'; item.textContent = result.title; item.dataset.videoId = result.videoId; searchResultsDiv.appendChild(item); }); }
+        searchButton.addEventListener('click', fetchSearchResults);
+        searchQuery.addEventListener('keyup', (event) => { if(event.key === 'Enter') fetchSearchResults(); });
+        searchResultsDiv.addEventListener('click', (event) => { if (event.target && event.target.matches('.result-item')) { const video = { videoId: event.target.dataset.videoId, title: event.target.textContent }; if (video.videoId) { socket.emit('add-to-queue', video); searchResultsDiv.innerHTML = ''; } } });
+        queueListDiv.addEventListener('click', (event) => { if (event.target && event.target.matches('.queue-item')) { const songIndex = parseInt(event.target.dataset.index, 10); if (!isNaN(songIndex)) { socket.emit('skip-to-song', { index: songIndex }); } } });
+        socket.on('queue-update', updateQueue);
+        loadButton.addEventListener('click', () => { const songUrl = songUrlInput.value; const videoId = extractVideoID(songUrl); socket.emit('url-submitted', { url: songUrl, videoId: videoId, title: 'Canción desde enlace' }); songUrlInput.value = ''; });
+        function sendMessage() { const messageText = chatInput.value; if (messageText.trim() === '') return; if (userName === '') { alert('Por favor, guarda tu nombre antes de chatear.'); return; } socket.emit('chat-message', { name: userName, text: messageText }); chatInput.value = ''; }
+        chatSendButton.addEventListener('click', sendMessage);
+        chatInput.addEventListener('keyup', (event) => { if (event.key === 'Enter') { sendMessage(); } });
+        socket.on('new-message', (data) => { const messageElement = document.createElement('div'); messageElement.classList.add('message'); const sender = document.createElement('span'); sender.className = 'sender'; sender.textContent = `${data.sender}: `; sender.style.color = data.color; const text = document.createElement('span'); text.className = 'text'; text.textContent = data.text; messageElement.appendChild(sender); messageElement.appendChild(text); chatMessages.appendChild(messageElement); chatMessages.scrollTop = chatMessages.scrollHeight; });
+        socket.on('user-count-update', (count) => { userCounterDiv.textContent = `👤 ${count} en la radio`; });
+        function onYouTubeIframeAPIReady() { player = new YT.Player('player', { height: '100%', width: '100%', events: { 'onReady': onPlayerReady, 'onStateChange': onPlayerStateChange, 'onError': onPlayerError }}); }
+        function onPlayerError(event) { const errorOverlay = document.getElementById('error-overlay'); const errorMessage = document.getElementById('error-message'); if (event.data === 101 || event.data === 150) { errorMessage.textContent = "El autor ha bloqueado este video. ¡Prueba con otro resultado!"; } else { errorMessage.textContent = "Ocurrió un error al cargar este video."; } errorOverlay.style.display = 'flex'; setTimeout(() => { errorOverlay.style.display = 'none'; }, 6000); }
+        function onPlayerReady(event) { isPlayerReady = true; if (initialState) handleInitialState(initialState); initializeSortable(); }
+        joinButton.addEventListener('click', () => { if (player && initialState) { lastServerUpdate = Date.now(); player.unMute(); player.seekTo(initialState.currentTime, true); player.playVideo(); document.getElementById('join-overlay').style.display = 'none'; } });
+        function onPlayerStateChange(event) { if (Date.now() - lastServerUpdate < 1000) return; if (!isPlayerReady) return; if (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.PAUSED) { socket.emit('state-change', { isPlaying: event.data === YT.PlayerState.PLAYING, currentTime: player.getCurrentTime() }); } else if (event.data === YT.PlayerState.ENDED) { socket.emit('song-ended'); } }
+        socket.on('state-update', (state) => { if (!isPlayerReady) return; lastServerUpdate = Date.now(); updateQueue(state.queue); const currentVideo = state.currentVideo; if (currentVideo) { const currentVideoUrl = player.getVideoUrl() || ''; if (!currentVideoUrl.includes(currentVideo.videoId)) { player.loadVideoById(currentVideo.videoId, state.currentTime); } if (Math.abs(player.getCurrentTime() - state.currentTime) > 1.5) { player.seekTo(state.currentTime, true); } if (state.isPlaying) { player.playVideo(); } else { player.pauseVideo(); } } else { player.stopVideo(); } });
+        socket.on('sync-state', (state) => { initialState = state; if (isPlayerReady) handleInitialState(state); });
+        function handleInitialState(state) { if (isPlayerReady) { updateQueue(state.queue); const currentVideo = state.currentVideo; if (currentVideo) { player.loadVideoById(currentVideo.videoId, state.currentTime); player.mute(); if(state.isPlaying) { document.getElementById('join-overlay').style.display = 'flex'; } } } }
+        function extractVideoID(url) { if(!url) return null; let videoID = null; const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/; const match = url.match(regExp); if (match && match[2].length === 11) { videoID = match[2]; } return videoID; }
+    </script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+{"name":"radiochocomenta","version":"1.0.0","description":"Nuestra radio privada","main":"server.js","scripts":{"start":"nodemon server.js"},"keywords":[],"author":"","license":"ISC","dependencies":{"axios":"^1.12.2","dotenv":"^17.2.3","express":"^5.1.0","nodemon":"^3.1.10","socket.io":"^4.8.1"}}
