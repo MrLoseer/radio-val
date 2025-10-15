@@ -55,20 +55,29 @@ app.get('/search', async (req, res) => {
     try {
         const token = await getSpotifyToken();
         if (!token) throw new Error("No se pudo autenticar con Spotify.");
+        
         const spotifyResponse = await axios.get('https://api.spotify.com/v1/search', {
             headers: { 'Authorization': `Bearer ${token}` },
-            params: { q: query, type: 'track', limit: 5 }
+            params: { q: query, type: 'track', limit: 1 } // Volvemos a limit: 1 para más precisión
         });
+
         const track = spotifyResponse.data.tracks.items[0];
-        if (!track) { return res.json({ results: [] }); }
+        
+        // --- ¡ESTA ES LA LÍNEA QUE ARREGLA EL BUG! ---
+        if (!track) { return res.json({ results: [] }); } // Si no hay canción, devuelve una lista vacía.
+        
         const youtubeQuery = `${track.name} ${track.artists[0].name}`;
+        
         const youtubeResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
             params: { part: 'snippet', q: youtubeQuery, key: YOUTUBE_API_KEY, type: 'video', maxResults: 5 }
         });
+        
         const results = youtubeResponse.data.items.map(item => ({
             videoId: item.id.videoId, title: item.snippet.title
         }));
+        
         res.json({ results });
+
     } catch (error) { console.error("Error en la búsqueda:", error.response ? error.response.data : error.message); res.status(500).json({ error: "Ocurrió un error en el servidor al buscar." }); }
 });
 
