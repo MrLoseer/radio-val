@@ -27,6 +27,9 @@ const chatColors = ['#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#e67e22', '#1ab
 const userColors = {};
 let spotifyToken = null;
 
+// ----------------------------------------------------------
+// TOKEN DE SPOTIFY
+// ----------------------------------------------------------
 async function getSpotifyToken() {
     if (spotifyToken && spotifyToken.expires_at > Date.now()) { return spotifyToken.access_token; }
     try {
@@ -38,17 +41,26 @@ async function getSpotifyToken() {
             },
             data: 'grant_type=client_credentials'
         });
-        spotifyToken = { access_token: response.data.access_token, expires_at: Date.now() + response.data.expires_in * 1000, };
+        spotifyToken = { access_token: response.data.access_token, expires_at: Date.now() + response.data.expires_in * 1000 };
         return spotifyToken.access_token;
-    } catch (error) { console.error("Error al obtener el token de Spotify:", error.response ? error.response.data : error.message); return null; }
+    } catch (error) {
+        console.error("Error al obtener el token de Spotify:", error.response ? error.response.data : error.message);
+        return null;
+    }
 }
 
+// ----------------------------------------------------------
+// ENDPOINT DE SORPRESA
+// ----------------------------------------------------------
 app.get('/surprise', (req, res) => {
     const today = new Date().toISOString().slice(0, 10);
     const todaysSurprise = surprises.find(s => s.date === today);
     if (todaysSurprise) { res.json(todaysSurprise); } else { res.json(null); }
 });
 
+// ----------------------------------------------------------
+// BÚSQUEDA EN SPOTIFY + YOUTUBE
+// ----------------------------------------------------------
 app.get('/search', async (req, res) => {
     const query = req.query.q;
     if (!query) { return res.status(400).json({ error: 'Debes especificar una búsqueda.' }); }
@@ -58,29 +70,76 @@ app.get('/search', async (req, res) => {
         
         const spotifyResponse = await axios.get('https://api.spotify.com/v1/search', {
             headers: { 'Authorization': `Bearer ${token}` },
-            params: { q: query, type: 'track', limit: 1 } // Volvemos a limit: 1 para más precisión
+            params: { q: query, type: 'track', limit: 1 }
         });
 
         const track = spotifyResponse.data.tracks.items[0];
-        
-        // --- ¡ESTA ES LA LÍNEA QUE ARREGLA EL BUG! ---
-        if (!track) { return res.json({ results: [] }); } // Si no hay canción, devuelve una lista vacía.
-        
+        if (!track) { return res.json({ results: [] }); }
+
         const youtubeQuery = `${track.name} ${track.artists[0].name}`;
-        
         const youtubeResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
             params: { part: 'snippet', q: youtubeQuery, key: YOUTUBE_API_KEY, type: 'video', maxResults: 5 }
         });
-        
+
         const results = youtubeResponse.data.items.map(item => ({
             videoId: item.id.videoId, title: item.snippet.title
         }));
         
         res.json({ results });
-
-    } catch (error) { console.error("Error en la búsqueda:", error.response ? error.response.data : error.message); res.status(500).json({ error: "Ocurrió un error en el servidor al buscar." }); }
+    } catch (error) {
+        console.error("Error en la búsqueda:", error.response ? error.response.data : error.message);
+        res.status(500).json({ error: "Ocurrió un error en el servidor al buscar." });
+    }
 });
 
+// ----------------------------------------------------------
+// IMPORTAR PLAYLIST DE SPOTIFY
+// ----------------------------------------------------------
+app.get('/spotify-playlist', async (req, res) => {
+    const playlistUrl = req.query.url;
+    if (!playlistUrl) return res.status(400).json({ error: 'Falta el enlace de la playlist de Spotify.' });
+
+    try {
+        const token = await getSpotifyToken();
+        const playlistId = playlistUrl.split('/playlist/')[1].split('?')[0];
+        const spotifyResponse = await axios.get(`https://api.spotify.com/v1/playlists/${playlistId}/tracks`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { limit: 30 }
+        });
+
+        const tracks = spotifyResponse.data.items.map(item => {
+            const t = item.track;
+            return `${t.name} ${t.artists.map(a => a.name).join(", ")}`;
+        });
+
+        const results = [];
+        for (const query of tracks) {
+            const yt = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+                params: { part: 'snippet', q: query, key: YOUTUBE_API_KEY, type: 'video', maxResults: 1 }
+            });
+            if (yt.data.items.length > 0) {
+                results.push({
+                    videoId: yt.data.items[0].id.videoId,
+                    title: yt.data.items[0].snippet.title
+                });
+            }
+        }
+
+        radioState.queue.unshift(...results);
+        io.emit('queue-update', radioState.queue);
+
+        if (!radioState.currentVideo) playNextSongInQueue();
+
+        res.json({ added: results.length, results });
+    } catch (error) {
+        console.error("Error al importar la playlist de Spotify:", error.message);
+        res.status(500).json({ error: "Error al procesar la playlist." });
+    }
+});
+
+// ----------------------------------------------------------
+// SISTEMA DE SOCKETS
+// ----------------------------------------------------------
 app.get('/', (req, res) => { res.sendFile(__dirname + '/index.html'); });
 
 io.on('connection', (socket) => {
@@ -88,7 +147,7 @@ io.on('connection', (socket) => {
   userColors[socket.id] = chatColors[Math.floor(Math.random() * chatColors.length)];
   if (!radioState.master) { radioState.master = socket.id; }
   socket.emit('sync-state', radioState);
-  io.emit('user-count-update', io.sockets.adapter.sids.size);
+  io.emit('user-count-update', io.sockets.sockets.size);
 
   socket.on('url-submitted', async (data) => {
         const url = data.url;
@@ -96,22 +155,20 @@ io.on('connection', (socket) => {
             try {
                 const playlistId = new URL(url).searchParams.get('list');
                 const response = await axios.get('https://www.googleapis.com/youtube/v3/playlistItems', {
-                    params: { part: 'snippet', playlistId: playlistId, key: YOUTUBE_API_KEY, maxResults: 50 }
+                    params: { part: 'snippet', playlistId, key: YOUTUBE_API_KEY, maxResults: 50 }
                 });
                 const videos = response.data.items.map(item => ({
                     videoId: item.snippet.resourceId.videoId,
                     title: item.snippet.title
                 }));
-                // --- CAMBIO AQUÍ ---
-                radioState.queue.unshift(...videos); // Añade todas las canciones al principio de la cola
+                radioState.queue.unshift(...videos);
                 if (!radioState.currentVideo) { playNextSongInQueue(); }
                 else { io.emit('queue-update', radioState.queue); }
             } catch (error) { console.error("Error al procesar la playlist de YouTube:", error); }
         } else {
             const videoId = data.videoId;
             if (videoId) {
-                // --- CAMBIO AQUÍ ---
-                radioState.queue.unshift({ videoId, title: data.title }); // Añade la canción al principio
+                radioState.queue.unshift({ videoId, title: data.title });
                 if (!radioState.currentVideo) { playNextSongInQueue(); }
                 else { io.emit('queue-update', radioState.queue); }
             }
@@ -119,14 +176,13 @@ io.on('connection', (socket) => {
     });
 
   socket.on('add-to-queue', (video) => {
-      // --- CAMBIO AQUÍ ---
-      radioState.queue.unshift(video); // Añade la canción al principio
+      radioState.queue.unshift(video);
       if (!radioState.currentVideo && radioState.queue.length === 1) { playNextSongInQueue(); } 
       else { io.emit('queue-update', radioState.queue); }
   });
 
-  socket.on('song-ended', () => {
-      if (socket.id === radioState.master) { playNextSongInQueue(); }
+  socket.on('song-ended', async () => {
+      if (socket.id === radioState.master) { await playNextSongInQueue(true); }
   });
 
   socket.on('skip-to-song', (data) => {
@@ -164,17 +220,50 @@ io.on('connection', (socket) => {
     console.log(`Alguien se ha desconectado: ${socket.id}`);
     delete userColors[socket.id];
     if (radioState.master === socket.id) { radioState.master = null; }
-    io.emit('user-count-update', io.sockets.adapter.sids.size);
+    io.emit('user-count-update', io.sockets.sockets.size);
   });
 });
 
-function playNextSongInQueue() {
+// ----------------------------------------------------------
+// FUNCIÓN PARA REPRODUCIR LA SIGUIENTE CANCIÓN + AUTOPLAY
+// ----------------------------------------------------------
+async function playNextSongInQueue(auto = false) {
     if (radioState.queue.length > 0) {
         const nextVideo = radioState.queue.shift();
         radioState.currentVideo = nextVideo;
         radioState.isPlaying = true;
         radioState.currentTime = 0;
         io.emit('state-update', radioState);
+    } else if (auto && radioState.currentVideo) {
+        // --- AUTOPLAY INTELIGENTE ---
+        try {
+            const query = radioState.currentVideo.title.split('-')[0];
+            const response = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+                params: {
+                    part: 'snippet',
+                    relatedToVideoId: radioState.currentVideo.videoId,
+                    type: 'video',
+                    key: YOUTUBE_API_KEY,
+                    maxResults: 5
+                }
+            });
+            if (response.data.items.length > 0) {
+                const nextRelated = response.data.items[0];
+                radioState.queue.push({
+                    videoId: nextRelated.id.videoId,
+                    title: nextRelated.snippet.title
+                });
+                console.log(`Autoplay: agregada canción relacionada: ${nextRelated.snippet.title}`);
+                playNextSongInQueue();
+            } else {
+                console.log("No se encontraron videos relacionados para autoplay.");
+                radioState.currentVideo = null;
+                radioState.isPlaying = false;
+                io.emit('state-update', radioState);
+            }
+        } catch (err) {
+            console.error("Error en autoplay:", err.message);
+        }
     } else {
         radioState.currentVideo = null;
         radioState.isPlaying = false;
@@ -182,5 +271,8 @@ function playNextSongInQueue() {
     }
 }
 
+// ----------------------------------------------------------
 const PORT = 3000;
-server.listen(PORT, () => { console.log(`Radio Chocomenta sonando en http://localhost:${PORT}`); });
+server.listen(PORT, () => {
+    console.log(`🎧 Radio Chocomenta sonando en http://localhost:${PORT}`);
+});
