@@ -15,10 +15,51 @@ try {
     console.log("Archivo de sorpresas cargado correctamente.");
 } catch (error) { console.error("No se pudo leer el archivo surprises.json:", error); }
 
-// --- ZONA DE CLAVES SECRETAS ---
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+// =====================================
+// 🔑 ZONA DE CLAVES SECRETAS - MÚLTIPLES APIs
+// =====================================
+const YOUTUBE_API_KEYS = [
+    process.env.YOUTUBE_API_KEY_1,
+    process.env.YOUTUBE_API_KEY_2,
+    process.env.YOUTUBE_API_KEY_3
+].filter(key => key); // Filtra las claves que existan
+
 const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
+
+// Contador para distribuir las peticiones entre las APIs
+let apiKeyIndex = 0;
+
+// =====================================
+// 🎯 FUNCIÓN PARA OBTENER LA SIGUIENTE API KEY
+// =====================================
+function getNextYouTubeApiKey() {
+    if (YOUTUBE_API_KEYS.length === 0) {
+        console.error("❌ No hay ninguna API key de YouTube configurada!");
+        return null;
+    }
+    
+    // Rotación circular entre las APIs disponibles
+    const key = YOUTUBE_API_KEYS[apiKeyIndex];
+    apiKeyIndex = (apiKeyIndex + 1) % YOUTUBE_API_KEYS.length;
+    
+    console.log(`🔑 Usando YouTube API #${apiKeyIndex === 0 ? YOUTUBE_API_KEYS.length : apiKeyIndex} de ${YOUTUBE_API_KEYS.length}`);
+    return key;
+}
+
+// =====================================
+// 🎲 FUNCIÓN PARA OBTENER UNA API KEY ALEATORIA
+// =====================================
+function getRandomYouTubeApiKey() {
+    if (YOUTUBE_API_KEYS.length === 0) {
+        console.error("❌ No hay ninguna API key de YouTube configurada!");
+        return null;
+    }
+    
+    const randomIndex = Math.floor(Math.random() * YOUTUBE_API_KEYS.length);
+    console.log(`🎲 Usando YouTube API aleatoria #${randomIndex + 1} de ${YOUTUBE_API_KEYS.length}`);
+    return YOUTUBE_API_KEYS[randomIndex];
+}
 
 app.use(express.static('public'));
 
@@ -88,17 +129,53 @@ async function getSpotifyPlaylistTracks(playlistUrl) {
 }
 
 // =====================================
-// 🔍 BÚSQUEDA EN YOUTUBE
+// 🔍 BÚSQUEDA EN YOUTUBE (CON ROTACIÓN DE APIs)
 // =====================================
-async function searchYouTubeVideo(query) {
+async function searchYouTubeVideo(query, useRandom = false) {
+    const apiKey = useRandom ? getRandomYouTubeApiKey() : getNextYouTubeApiKey();
+    
+    if (!apiKey) {
+        console.error("❌ No hay API key disponible para buscar en YouTube");
+        return null;
+    }
+    
     try {
         const youtubeResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
-            params: { part: 'snippet', q: query, key: YOUTUBE_API_KEY, type: 'video', maxResults: 1 }
+            params: { 
+                part: 'snippet', 
+                q: query, 
+                key: apiKey, 
+                type: 'video', 
+                maxResults: 1 
+            }
         });
         const item = youtubeResponse.data.items[0];
         return item ? { videoId: item.id.videoId, title: item.snippet.title } : null;
     } catch (error) {
         console.error("Error al buscar en YouTube:", error.response?.data || error.message);
+        
+        // Si falla, intenta con otra API key
+        if (YOUTUBE_API_KEYS.length > 1) {
+            console.log("🔄 Reintentando con otra API key...");
+            const fallbackKey = getRandomYouTubeApiKey();
+            if (fallbackKey && fallbackKey !== apiKey) {
+                try {
+                    const retryResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+                        params: { 
+                            part: 'snippet', 
+                            q: query, 
+                            key: fallbackKey, 
+                            type: 'video', 
+                            maxResults: 1 
+                        }
+                    });
+                    const item = retryResponse.data.items[0];
+                    return item ? { videoId: item.id.videoId, title: item.snippet.title } : null;
+                } catch (retryError) {
+                    console.error("❌ También falló el reintento:", retryError.message);
+                }
+            }
+        }
         return null;
     }
 }
@@ -115,6 +192,7 @@ app.get('/surprise', (req, res) => {
 app.get('/search', async (req, res) => {
     const query = req.query.q;
     if (!query) { return res.status(400).json({ error: 'Debes especificar una búsqueda.' }); }
+    
     try {
         const token = await getSpotifyToken();
         if (!token) throw new Error("No se pudo autenticar con Spotify.");
@@ -128,9 +206,20 @@ app.get('/search', async (req, res) => {
         if (!track) { return res.json({ results: [] }); }
         
         const youtubeQuery = `${track.name} ${track.artists[0].name}`;
+        const apiKey = getNextYouTubeApiKey();
+        
+        if (!apiKey) {
+            return res.status(500).json({ error: "No hay API keys de YouTube disponibles." });
+        }
         
         const youtubeResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
-            params: { part: 'snippet', q: youtubeQuery, key: YOUTUBE_API_KEY, type: 'video', maxResults: 5 }
+            params: { 
+                part: 'snippet', 
+                q: youtubeQuery, 
+                key: apiKey, 
+                type: 'video', 
+                maxResults: 5 
+            }
         });
         
         const results = youtubeResponse.data.items.map(item => ({
@@ -183,8 +272,19 @@ io.on('connection', (socket) => {
             } else if (url.includes("list=")) {
                 // 🔴 PLAYLIST DE YOUTUBE
                 const playlistId = new URL(url).searchParams.get('list');
+                const apiKey = getNextYouTubeApiKey();
+                
+                if (!apiKey) {
+                    throw new Error("No hay API keys de YouTube disponibles.");
+                }
+                
                 const response = await axios.get('https://www.googleapis.com/youtube/v3/playlistItems', {
-                    params: { part: 'snippet', playlistId: playlistId, key: YOUTUBE_API_KEY, maxResults: 50 }
+                    params: { 
+                        part: 'snippet', 
+                        playlistId: playlistId, 
+                        key: apiKey, 
+                        maxResults: 50 
+                    }
                 });
                 const videos = response.data.items.map(item => ({
                     videoId: item.snippet.resourceId.videoId,
@@ -263,7 +363,7 @@ io.on('connection', (socket) => {
 });
 
 // =====================================
-// 🔁 FUNCIÓN DE AUTOPLAY INTELIGENTE
+// 🔁 FUNCIÓN DE AUTOPLAY INTELIGENTE (CON ROTACIÓN DE APIs)
 // =====================================
 async function playNextSongInQueue() {
     if (radioState.queue.length > 0) {
@@ -279,12 +379,18 @@ async function playNextSongInQueue() {
         // No hay cola, pero había una canción actual - activar autoplay
         try {
             console.log(`🔍 Buscando recomendación para: ${radioState.currentVideo.videoId}`);
+            const apiKey = getRandomYouTubeApiKey(); // Usa API aleatoria para autoplay
+            
+            if (!apiKey) {
+                throw new Error("No hay API keys disponibles");
+            }
+            
             const response = await axios.get('https://www.googleapis.com/youtube/v3/search', {
                 params: {
                     part: 'snippet',
                     relatedToVideoId: radioState.currentVideo.videoId,
                     type: 'video',
-                    key: YOUTUBE_API_KEY,
+                    key: apiKey,
                     maxResults: 5,
                     q: ''
                 }
@@ -317,14 +423,20 @@ async function playNextSongInQueue() {
         } catch (error) {
             console.error("❌ Error al buscar recomendación:", error.response?.data || error.message);
             
-            // Fallback: buscar por título de la canción actual
+            // Fallback: buscar por título de la canción actual con otra API
             if (radioState.currentVideo?.title) {
                 try {
+                    const fallbackKey = getRandomYouTubeApiKey();
+                    
+                    if (!fallbackKey) {
+                        throw new Error("No hay API keys disponibles para fallback");
+                    }
+                    
                     const fallbackResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
                         params: {
                             part: 'snippet',
                             q: radioState.currentVideo.title,
-                            key: YOUTUBE_API_KEY,
+                            key: fallbackKey,
                             type: 'video',
                             maxResults: 5
                         }
@@ -372,5 +484,9 @@ async function playNextSongInQueue() {
 // =====================================
 const PORT = 3000;
 server.listen(PORT, () => { 
-    console.log(`🎵 Radio Chocomenta sonando en http://localhost:${PORT}`); 
+    console.log(`🎵 Radio Chocomenta sonando en http://localhost:${PORT}`);
+    console.log(`📊 APIs de YouTube configuradas: ${YOUTUBE_API_KEYS.length}`);
+    if (YOUTUBE_API_KEYS.length === 0) {
+        console.warn("⚠️ ADVERTENCIA: No hay ninguna API key de YouTube configurada!");
+    }
 });
